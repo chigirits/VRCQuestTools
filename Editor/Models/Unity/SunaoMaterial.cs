@@ -88,6 +88,15 @@ namespace KRT.VRCQuestTools.Models.Unity
         private int EmissionAnimationXSize => Mathf.FloorToInt(Material.GetFloat("_EmissionAnimX"));
         private int EmissionAnimationYSize => Mathf.FloorToInt(Material.GetFloat("_EmissionAnimY"));
 
+        // Sparkle
+        private bool SparkleEnable => Material.GetFloat("_SparkleEnable") > 0.0f;
+        private Texture SparkleParameterMap => Material.GetTexture("_SparkleParameterMap");
+        private float SparkleDensity => Material.GetFloat("_SparkleDensity");
+        private float SparkleSmoothness => Material.GetFloat("_SparkleSmoothness");
+        private float SparkleFineness => Material.GetFloat("_SparkleFineness");
+        private float SparkleAngularBlink => Material.GetFloat("_SparkleAngularBlink");
+        private float SparkleTimeBlink => Material.GetFloat("_SparkleTimeBlink");
+
         // Gamma Fix
         private bool GammaFixEnable => Material.GetFloat("_EnableGammaFix") > 0.5f;
         private float GammaR => Material.GetFloat("_GammaR");
@@ -477,9 +486,30 @@ namespace KRT.VRCQuestTools.Models.Unity
             return main;
         }
 
+        private static float GlslSmoothStep(float min, float max, float v)
+        {
+            var r = max - min;
+            if (r == 0f) return 0.5f;
+            var t = Mathf.Clamp((v - min) / r, 0f, 1f);
+            return t * t * (3f - 2f * t);
+        }
+
+        private static float Sparkles(float x, float y, float density, float smoothness, float fineness, float rotationSensitivity, float blinkFrequency)
+        {
+            smoothness *= 0.5f;
+            fineness *= 1000.0f;
+            var thr = 1.0f - density;
+            var a = rotationSensitivity * .5f;
+            var t = blinkFrequency;
+            var s1 = Mathf.PerlinNoise(x*fineness+a-t, y*fineness+a-t) * 2f - 1f;
+            var s2 = Mathf.PerlinNoise(x*fineness+t, y*fineness+t) * 2f - 1f;
+            return GlslSmoothStep(thr-smoothness, thr+smoothness, s1*s2);
+        }
+
         private MagickImage CompositeEmissionImage()
         {
             using (var emap = MagickImageUtility.GetMagickImage(EmissionMap) ?? new MagickImage(MagickColors.White, 2, 2))
+            using (var spmap = MagickImageUtility.GetMagickImage(SparkleParameterMap) ?? new MagickImage(MagickColors.White, 2, 2))
             using (var e1 = MagickImageUtility.Multiply(emap, EmissionColor))
             using (var e2 = MagickImageUtility.GetMagickImage(SecondEmissionMap) ?? new MagickImage(MagickColors.White, 2, 2))
             {
@@ -494,29 +524,52 @@ namespace KRT.VRCQuestTools.Models.Unity
                 var size = Math.Max(e1.Width, e2.Width);
                 e1.Resize(size, size);
                 e2.Resize(size, size);
+                spmap.Resize(size, size);
                 using (var emission1 = new MagickImage(MagickColors.Black, size, size))
                 using (var emission2 = new MagickImage(MagickColors.Black, size, size))
+                using (var sparkleParamMap = new MagickImage(MagickColors.Black, size, size))
                 {
                     emission1.Composite(e1, CompositeOperator.Over);
                     emission2.Composite(e2, CompositeOperator.Over);
+                    sparkleParamMap.Composite(spmap, CompositeOperator.Over);
 
                     var result = new MagickImage(MagickColors.Black, size, size);
                     result.Composite(emission1, CompositeOperator.Over);
                     result.Composite(emission2, CompositeOperator.Multiply);
                     using (var pc = result.GetPixels())
+                    using (var spmapPC = sparkleParamMap.GetPixels())
                     {
                         var values = pc.GetValues();
+                        var spmapValues = spmapPC.GetValues();
                         var channels = pc.Channels;
                         var intensity = EmissionIntensity;
+                        var sparkleEnable = true; // SparkleEnable;
+                        var sparkleDensity = SparkleDensity;
+                        var sparkleSmoothness = SparkleSmoothness;
+                        var sparkleFineness = SparkleFineness;
+                        var sparkleAngularBlink = SparkleAngularBlink;
+                        var sparkleTimeBlink = SparkleTimeBlink;
                         Parallel.For(0, values.Length / channels, (index) =>
                         {
                             var baseIndex = index * channels;
                             var r = values[baseIndex + 0];
                             var g = values[baseIndex + 1];
                             var b = values[baseIndex + 2];
-                            values[baseIndex + 0] = Saturate(r * intensity);
-                            values[baseIndex + 1] = Saturate(g * intensity);
-                            values[baseIndex + 2] = Saturate(b * intensity);
+                            var sparkleValue = 1f;
+                            if (sparkleEnable)
+                            {
+                                float x = (float)(index % size) / (float)size * 2f - 1f;
+                                float y = (float)(index / size) / (float)size * 2f - 1f;
+                                float sp0 = (float)spmapValues[baseIndex + 0] / (float)Quantum.Max;
+                                float sp1 = (float)spmapValues[baseIndex + 1] / (float)Quantum.Max;
+                                float sp2 = (float)spmapValues[baseIndex + 2] / (float)Quantum.Max;
+                                sparkleValue = Sparkles(x, y,
+                                    sparkleDensity * sp0, sparkleSmoothness * sp1, sparkleFineness * sp2,
+                                    sparkleAngularBlink, sparkleTimeBlink);
+                            }
+                            values[baseIndex + 0] = Saturate(r * intensity * sparkleValue);
+                            values[baseIndex + 1] = Saturate(g * intensity * sparkleValue);
+                            values[baseIndex + 2] = Saturate(b * intensity * sparkleValue);
                         });
                         pc.SetPixels(values);
                     }
